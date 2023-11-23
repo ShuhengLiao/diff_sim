@@ -116,25 +116,32 @@ def chunk(ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps):
 
     fwd_pred = get_fwd_pred(num_total_steps)
 
-    grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
-    return grad_result_chunks
+    # grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
+    # return grad_result_chunks
 
     # result = fwd_pred(y_combo_ini)
     # print(f"result sum = {np.sum(result[0])}")
 
-    # # Method 1: The entire trajectory is just one chunk
-    # start_time = time.time()
-    # grad_result = jax.grad(obj_fn)(y_combo_ini)
-    # time_elapsed = time.time()-start_time
-    # print(f"grad_result = {grad_result[1]}")
-    # print(f"Time elapsed {time_elapsed} for 1 chunck") 
+    # Method 1: The entire trajectory is just one chunk
+    start_time = time.time()
+    grad_result = jax.grad(obj_fn)(y_combo_ini)
+    time_elapsed = time.time()-start_time
+    print(f"grad_result = {grad_result[1]}")
+    print(f"Time elapsed {time_elapsed} for 1 chunck") 
+
+    # Method 1: The entire trajectory is just one chunk
+    start_time = time.time()
+    grad_result = jax.grad(obj_fn)(y_combo_ini)
+    time_elapsed = time.time()-start_time
+    print(f"grad_result = {grad_result[1]}")
+    print(f"Time elapsed {time_elapsed} for 1 chunck") 
 
     # Method 2: The entire trajectory is divided into chunks
-    # start_time = time.time()
-    # grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
-    # time_elapsed = time.time()-start_time
-    # print(f"grad_result_chunk = {grad_result_chunks[1]}")
-    # print(f"Time elapsed {time_elapsed} for {num_total_steps // chunksize} chuncks") 
+    start_time = time.time()
+    grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
+    time_elapsed = time.time()-start_time
+    print(f"grad_result_chunk = {grad_result_chunks[1]}")
+    print(f"Time elapsed {time_elapsed} for {num_total_steps // chunksize} chuncks") 
 
 
 def example():
