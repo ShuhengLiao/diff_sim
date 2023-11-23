@@ -115,5 +115,5 @@ def read_path(path):
         ps.append(ps_seg)
 
     ts, xs, ys, ps = onp.hstack(ts), onp.hstack(xs), onp.hstack(ys), onp.hstack(ps)  
-    print(f"Total number of time steps = {len(ts)}")
+    print(f"Total number of time steps = {len(ts[1:])}")
     return ts, xs, ys, ps

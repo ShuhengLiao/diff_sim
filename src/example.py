@@ -4,13 +4,21 @@ See https://doi.org/10.1016/j.actamat.2021.116862
 '''
 import jax
 import jax.numpy as np
+from jax import linear_util as lu
+from jax.flatten_util import ravel_pytree
 import numpy as onp
+from functools import partial
+import matplotlib.pyplot as plt
+import scipy.optimize as opt
+import sys
 import os
 import meshio
+import time
 from src.utils import read_path, obj_to_vtu, walltime
 from src.arguments import args
-from src.allen_cahn import polycrystal_fd, phase_field, odeint, explicit_euler
-
+from src.allen_cahn import polycrystal_fd, odeint, rk4, explicit_euler
+from src.checkpoint import chunk
+jax.config.update("jax_enable_x64", True)
 
 def set_params():
     '''
@@ -23,7 +31,7 @@ def set_params():
     args.domain_height = 0.1
     args.r_beam = 0.03
     args.power = 100
-    args.write_sol_interval = 1000
+    args.write_sol_interval = 40000
     
     # args.ad_hoc = 0.1
 
@@ -64,6 +72,108 @@ def initialization(poly_sim):
     y0 = eta
     return y0
 
+def phase_field(polycrystal):
+
+    centroids = polycrystal.centroids
+    # TODO: make this simpler
+    mesh_h = polycrystal.ch_len[0]
+
+
+    # TODO: consider anisotropic growth
+    def update_anisotropy():
+
+        sender_centroids = np.take(centroids, graph.senders, axis=0)
+        receiver_centroids = np.take(centroids, graph.receivers, axis=0)
+        edge_directions = sender_centroids - receiver_centroids
+        edge_directions = np.repeat(edge_directions[:, None, :], args.num_oris, axis=1) # (num_edges, num_oris, dim)
+ 
+        unique_grain_directions = polycrystal.unique_grain_directions # (num_directions_per_cube, num_oris, dim)
+
+        assert edge_directions.shape == (len(graph.senders), args.num_oris, args.dim)
+        cosines = np.sum(unique_grain_directions[None, :, :, :] * edge_directions[:, None, :, :], axis=-1) \
+                  / (np.linalg.norm(edge_directions, axis=-1)[:, None, :])
+        anlges =  np.arccos(cosines) 
+        anlges = np.where(np.isfinite(anlges), anlges, 0.)
+        anlges = np.where(anlges < np.pi/2., anlges, np.pi - anlges)
+        anlges = np.min(anlges, axis=1)
+
+        anisotropy_term = 1. + args.anisotropy * (np.cos(anlges)**4 + np.sin(anlges)**4) # (num_edges, num_oris)
+
+        assert anisotropy_term.shape == (len(graph.senders), args.num_oris)
+        graph.edges['anisotropy'] = anisotropy_term
+        print("End of compute_anisotropy...")
+
+    @jax.jit    
+    def get_T(t, ode_params):
+        '''
+        Analytic T from https://doi.org/10.1016/j.actamat.2021.116862
+        '''
+        Q, alpha = 25, 5.2
+
+        T_ambiant = 300.
+
+        kappa = 2.7*1e-2
+
+        vel = 1000.
+
+        hatch = ode_params/1000.
+        
+        y0 = -0.1
+        y1 = 0.4
+        track_time = (y1-y0)/vel
+
+        x0 = 0
+
+        X = centroids[:, 0] - (x0 + np.floor(t/track_time)*hatch)
+        # X = centroids[:, 0] - (x0 + np.floor(t/(2*track_time))*2*hatch + hatch - (np.floor(t/track_time) % 2)*hatch)
+        Y = centroids[:, 1] - (y0 + (t - np.floor(t/track_time)*track_time)*vel)
+        Z = centroids[:, 2] - args.domain_height
+ 
+        R = np.sqrt(X**2 + Y**2 + Z**2)
+        T = T_ambiant + Q / (2 * np.pi * kappa) / R * np.exp(-vel / (2*alpha) * (R + Y))
+
+        # TODO
+        T = np.where(T > 2000., 2000., T)
+
+        return T[:, None]
+
+    def local_energy_fn(eta, zeta):
+        gamma = 1
+        vmap_outer = jax.vmap(np.outer, in_axes=(0, 0))
+        grain_energy_1 = np.sum((eta**4/4. - eta**2/2.))
+        graph_energy_2 = gamma * (np.sum(vmap_outer(eta, eta)**2) - np.sum(eta**4))  
+        graph_energy_3 = np.sum((1 - zeta.reshape(-1))**2 * np.sum(eta**2, axis=1).reshape(-1))
+        grain_energy = args.m_g * (grain_energy_1 +  graph_energy_2 + graph_energy_3)
+        return grain_energy
+
+    local_energy_grad_fn = jax.grad(local_energy_fn, argnums=0) 
+
+    def state_rhs(state, t, ode_params):
+        eta = state
+        T = get_T(t, ode_params)
+        zeta = 0.5 * (1 - np.tanh(1e1*(T/args.T_melt - 1)))
+        local_energy_grad = local_energy_grad_fn(eta, zeta) / args.ad_hoc
+        # TODO: concatenate is slow, any workaround?
+        eta_xyz = np.reshape(eta, (args.Nz, args.Ny, args.Nx, args.num_oris))
+        eta_neg_x = np.concatenate((eta_xyz[:, :, :1, :], eta_xyz[:, :, :-1, :]), axis=2)
+        eta_pos_x = np.concatenate((eta_xyz[:, :, 1:, :], eta_xyz[:, :, -1:, :]), axis=2)
+        eta_neg_y = np.concatenate((eta_xyz[:, :1, :, :], eta_xyz[:, :-1, :, :]), axis=1)
+        eta_pos_y = np.concatenate((eta_xyz[:, 1:, :, :], eta_xyz[:, -1:, :, :]), axis=1)
+        eta_neg_z = np.concatenate((eta_xyz[:1, :, :, :], eta_xyz[:-1, :, :, :]), axis=0)
+        eta_pos_z = np.concatenate((eta_xyz[1:, :, :, :], eta_xyz[-1:, :, :, :]), axis=0)
+        # See https://en.wikipedia.org/wiki/Finite_difference "Second-order central"
+        laplace_xyz = -np.stack((eta_pos_x - 2*eta_xyz + eta_neg_x, 
+                                 eta_pos_y - 2*eta_xyz + eta_neg_y, 
+                                 eta_pos_z - 2*eta_xyz + eta_neg_z), axis=-1) / mesh_h**2 * args.kappa_g * args.ad_hoc
+        assert laplace_xyz.shape == (args.Nz, args.Ny, args.Nx, args.num_oris, args.dim)
+        laplace = np.sum(laplace_xyz.reshape(-1, args.num_oris, args.dim), axis=-1)
+        assert local_energy_grad.shape == laplace.shape
+        Lg = args.L0 * np.exp(-args.Qg / (T*args.gas_const))
+        rhs = -Lg * (local_energy_grad + laplace)
+        return rhs
+
+    return state_rhs, get_T
+
 
 def run():
     '''
@@ -72,14 +182,49 @@ def run():
     time [s], x_position [mm], y_position [mm], action_of_turning_laser_on_or_off_at_this_time [N/A]
     '''
     set_params()
-    ts, xs, ys, ps = read_path(f'data/txt/fd_example_1.txt')
+    dt = args.dt
+    ts = onp.arange(0,1e-3+dt,dt)
     polycrystal, mesh = polycrystal_fd(args.case)
     y0 = initialization(polycrystal)
     state_rhs, get_T = phase_field(polycrystal)
-    odeint(polycrystal, mesh, get_T, explicit_euler, state_rhs, y0, ts, [])
+    ode_params_gt = 50.
+    ode_params_0 = 30.
+    # odeint(polycrystal, mesh, get_T, explicit_euler, state_rhs, y0, ts, 30.,save_sols=True)
+    target_yf, _ = odeint(polycrystal, mesh, get_T, explicit_euler, state_rhs, y0, ts, ode_params_gt)
+
+    def obj_func(yf, target_yf):
+        # Some arbitrary objective function
+        return np.sum((yf - target_yf)**2)
+ 
+    obj_func_partial = lambda yf: obj_func(yf, target_yf)
+
+    # Early discretization seems to be the best option
+    # If we further use checkpoint method, we can compute derivative for a long time chain
+    def get_ode_fn():
+        @jax.jit
+        def ode_fn(y_prev, params_prev):
+            ode_params, dt, t_prev = params_prev
+            y_crt = y_prev + dt * state_rhs(y_prev, t_prev, ode_params)
+            t_crt = t_prev + dt
+            params_crt = (ode_params, dt, t_crt)
+            return (y_crt, params_crt)
+        return ode_fn
+
+    get_ode_fn = get_ode_fn()
+    y_combo_ini = (y0, (ode_params_0, dt, 0.))
+    print(f"start of checkpoint")
+    # chunksize = 5
+    chunksize = 50
+    num_total_steps = len(ts[1:])
+    chunk(get_ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps)
+
+    # Finite difference as ground truth
+    grads_fd = compute_gradient_fd([polycrystal, mesh, get_T], y0, ts, obj_func_partial, state_rhs, ode_params_0)
+    print(f"grads_fd = {grads_fd}\n")
+
 
 
 if __name__ == "__main__":
-    neper_domain()
+    # neper_domain()
     # write_vtu_files()
-    # run()
+    run()

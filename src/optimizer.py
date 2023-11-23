@@ -15,7 +15,7 @@ from src.arguments import args
 from src.allen_cahn import polycrystal_fd, phase_field, odeint, rk4, explicit_euler
 from src.example import initialization
 from src.checkpoint import chunk
-
+jax.config.update("jax_enable_x64", True)
 
 def set_params():
     '''
@@ -28,7 +28,7 @@ def set_params():
     args.domain_height = 0.1
     args.r_beam = 0.03
     args.power = 100
-    args.write_sol_interval = 1000
+    args.write_sol_interval = 50
 
 
 
@@ -169,7 +169,7 @@ def run():
     y_combo_ini = (y0, (ode_params_0, dt, 0.))
     print(f"start of checkpoint")
     # chunksize = 5
-    chunksize = 50
+    chunksize = 5
     num_total_steps = len(ts[1:])
     chunk(get_ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps)
 

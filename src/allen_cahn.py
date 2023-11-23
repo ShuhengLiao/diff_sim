@@ -50,38 +50,43 @@ def explicit_euler(state, t_crt, f, ode_params):
 
 
 @walltime
-def odeint(polycrystal, mesh, get_T, stepper, f, y0, ts, ode_params):
+def odeint(polycrystal, mesh, get_T, stepper, f, y0, ts, ode_params, save_sols = False):
     '''
     ODE integrator. 
     '''
     ys = [y0]
-    clean_sols()
     state = (y0, ts[0])
     T = get_T(ts[0], ode_params)
 
-    # write_sols(polycrystal, mesh, y0, T, 0)
+    if save_sols:
+        clean_sols()
+        write_sols(polycrystal, mesh, y0, T, 0)
 
     for (i, t_crt) in enumerate(ts[1:]):
         state, y = stepper(state, t_crt, f, ode_params)
         # ys.append(y)
         T = get_T(t_crt, ode_params)
 
-        print(f"i = {i}, len(ts) = {len(ts)}")
+        if save_sols: 
 
+            if (i + 1) % args.write_sol_interval == 0:
+                print(f"step {i + 1} of {len(ts[1:])}, unix timestamp = {time.time()}")
+                # print(y[:10, :5])
+                inspect_sol(y, y0, T)
+                if not np.all(np.isfinite(y)):          
+                    raise ValueError(f"Found np.inf or np.nan in y - stop the program")
 
-    #     if (i + 1) % 20 == 0:
-    #         print(f"step {i + 1} of {len(ts[1:])}, unix timestamp = {time.time()}")
-    #         # print(y[:10, :5])
-    #         inspect_sol(y, y0, T)
-    #         if not np.all(np.isfinite(y)):          
-    #             raise ValueError(f"Found np.inf or np.nan in y - stop the program")
-    #     write_sol_interval = args.write_sol_interval
-    #     if (i + 1) % write_sol_interval == 0:
-    #         write_sols(polycrystal, mesh, y, T, (i + 1) // write_sol_interval)
+            write_sol_interval = args.write_sol_interval
+            if (i + 1) % write_sol_interval == 0:
+                write_sols(polycrystal, mesh, y, T, (i + 1) // write_sol_interval)
 
-    # write_info(polycrystal)
+        # write_info(polycrystal)
+        else:
+            if (i+1) % args.write_sol_interval == 0:
+                print(f"i = {i+1}, Total number of time steps = {len(ts)-1}")
 
     return y, ys
+
 
  
 def inspect_sol(y, y0, T):
@@ -154,8 +159,8 @@ def write_sols(polycrystal, mesh, y, T, step):
     '''
     print(f"Write sols to file...")
     T, cell_ori_inds = write_sols_heper(polycrystal, mesh, y, T)
-    onp.save(f"data/numpy/{args.case}/sols/T_{step:03d}.npy", T)
-    onp.save(f"data/numpy/{args.case}/sols/cell_ori_inds_{step:03d}.npy", cell_ori_inds)
+    # onp.save(f"data/numpy/{args.case}/sols/T_{step:03d}.npy", T)
+    # onp.save(f"data/numpy/{args.case}/sols/cell_ori_inds_{step:03d}.npy", cell_ori_inds)
     mesh.write(f"data/vtk/{args.case}/sols/u{step:03d}.vtu")
  
 
@@ -190,8 +195,8 @@ def polycrystal_fd(domain_name='single_layer'):
 
     edges = []
     for i in range(Nx):
-        if i % 100 == 0:
-            print(f"i = {i}")
+        # if i % 100 == 0:
+        #     print(f"i = {i}")
         for j in range(Ny):
             for k in range(Nz):
                 crt_ind = i + j * Nx + k * Nx * Ny
@@ -262,6 +267,7 @@ def phase_field(polycrystal):
         graph.edges['anisotropy'] = anisotropy_term
         print("End of compute_anisotropy...")
 
+    @jax.jit    
     def get_T(t, ode_params):
         '''
         Analytic T from https://doi.org/10.1016/j.actamat.2021.116862

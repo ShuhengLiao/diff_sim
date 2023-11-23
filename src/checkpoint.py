@@ -3,11 +3,12 @@ import jax.numpy as np
 import jax.flatten_util
 import numpy as onp
 import os
+import time
 import glob
 
 
 crt_file_path = os.path.dirname(__file__)
-data_dir = os.path.join(crt_file_path, 'data')
+data_dir = os.path.join(crt_file_path, '../data')
 numpy_dir = os.path.join(data_dir, 'numpy')
 
 
@@ -39,7 +40,7 @@ def chunk(ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps):
         y_combos = [y_combo_ini]
         y_combo_crt = y_combo_ini
         for i in range(local_chunksize):
-            print(f"forward crt i = {i}")
+            #print(f"forward crt i = {i}")
             y_combo_crt = ode_fn(*y_combo_crt)
             y_combos.append(y_combo_crt)
         return y_combos
@@ -60,7 +61,7 @@ def chunk(ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps):
             local_chunksize = len(y_combos) - 1
             for i in range(local_chunksize):
                 crt_vjp = single_vjp_fn(y_combos[-(i + 2)], crt_vjp)
-                print(f"reverse crt i = {i}")
+                #print(f"reverse crt i = {i}")
             return crt_vjp,
 
         fwd_pred.defvjp(f_fwd, f_bwd)
@@ -81,7 +82,7 @@ def chunk(ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps):
                 y_combo_crt_flat, _ = jax.flatten_util.ravel_pytree(y_combo_crt)
                 np.save(file_name, y_combo_crt_flat)
 
-            print(f"Running forward crt i = {i}")
+            #print(f"Running forward crt i = {i}")
             y_combo_crt = ode_fn(*y_combo_crt)
 
         return y_combo_crt, (file_names, local_chunksizes)
@@ -115,16 +116,25 @@ def chunk(ode_fn, obj_func_partial, y_combo_ini, chunksize, num_total_steps):
 
     fwd_pred = get_fwd_pred(num_total_steps)
 
+    grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
+    return grad_result_chunks
+
     # result = fwd_pred(y_combo_ini)
     # print(f"result sum = {np.sum(result[0])}")
 
-    # Method 1: The entire trajectory is just one chunk
-    grad_result = jax.grad(obj_fn)(y_combo_ini)
-    print(f"grad_result = {grad_result[1]}")
+    # # Method 1: The entire trajectory is just one chunk
+    # start_time = time.time()
+    # grad_result = jax.grad(obj_fn)(y_combo_ini)
+    # time_elapsed = time.time()-start_time
+    # print(f"grad_result = {grad_result[1]}")
+    # print(f"Time elapsed {time_elapsed} for 1 chunck") 
 
     # Method 2: The entire trajectory is divided into chunks
-    grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
-    print(f"grad_result_chunk = {grad_result_chunks[1]}")
+    # start_time = time.time()
+    # grad_result_chunks = jax.grad(obj_fn_chunks)(y_combo_ini)
+    # time_elapsed = time.time()-start_time
+    # print(f"grad_result_chunk = {grad_result_chunks[1]}")
+    # print(f"Time elapsed {time_elapsed} for {num_total_steps // chunksize} chuncks") 
 
 
 def example():
